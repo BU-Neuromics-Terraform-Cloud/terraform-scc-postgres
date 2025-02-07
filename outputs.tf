@@ -1,18 +1,23 @@
 # Copyright (c) HashiCorp, Inc.
 # SPDX-License-Identifier: MPL-2.0
 
-output "rds_hostname" {
-  description = "RDS instance hostname"
-  value       = aws_db_instance.education.address
+output "postgres_data_directory" {
+  description = "PostgreSQL data directory location"
+  value       = var.data_directory
 }
 
-output "rds_port" {
-  description = "RDS instance port"
-  value       = aws_db_instance.education.port
+output "postgres_port" {
+  description = "PostgreSQL instance port"
+  value       = var.postgres_port
 }
 
-output "rds_username" {
-  description = "RDS instance root username"
-  value       = aws_db_instance.education.username
+output "postgres_user" {
+  description = "PostgreSQL username"
+  value       = var.postgres_user
+}
+
+output "postgres_database" {
+  description = "PostgreSQL database name"
+  value       = var.postgres_db
 }
 

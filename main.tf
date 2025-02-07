@@ -1,81 +1,123 @@
-# Copyright (c) HashiCorp, Inc.
-# SPDX-License-Identifier: MPL-2.0
-
-provider "aws" {
-  region = "us-east-2"
-}
-
-provider "random" {}
-
-data "aws_availability_zones" "available" {}
-
-resource "random_pet" "random" {}
-
-module "vpc" {
-  source  = "terraform-aws-modules/vpc/aws"
-  version = "2.77.0"
-
-  name                 = "${random_pet.random.id}-education"
-  cidr                 = "10.0.0.0/16"
-  azs                  = data.aws_availability_zones.available.names
-  public_subnets       = ["10.0.4.0/24", "10.0.5.0/24", "10.0.6.0/24"]
-  enable_dns_hostnames = true
-  enable_dns_support   = true
-}
-
-resource "aws_db_subnet_group" "education" {
-  name       = "${random_pet.random.id}-education"
-  subnet_ids = module.vpc.public_subnets
-
-  tags = {
-    Name = "${random_pet.random.id} Education"
+terraform {
+  required_providers {
+    null = {
+      source = "hashicorp/null"
+      version = "~> 3.0"
+    }
+    local = {
+      source = "hashicorp/local"
+      version = "~> 2.0"
+    }
   }
 }
 
-resource "aws_security_group" "rds" {
-  name   = "${random_pet.random.id}-education_rds"
-  vpc_id = module.vpc.vpc_id
+# Define local variables
+locals {
+  postgres_data = var.data_directory
+  postgres_port = var.postgres_port
+  postgres_version = var.postgres_version
+  postgres_user = var.postgres_user
+  postgres_db = var.postgres_db
+  # Use environment variable or change this
+  postgres_password = var.postgres_password
+}
 
-  ingress {
-    from_port   = 5432
-    to_port     = 5432
-    protocol    = "tcp"
-    cidr_blocks = ["192.80.0.0/16"]
+# Pull PostgreSQL image
+resource "null_resource" "postgres_pull" {
+  provisioner "local-exec" {
+    command = <<-EOT
+    if [ ! -f postgres.sif ]; then
+      singularity pull postgres.sif docker://postgres:${local.postgres_version}
+    fi
+    EOT
   }
-
-  egress {
-    from_port   = 5432
-    to_port     = 5432
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "${random_pet.random.id}-education_rds"
+}
+# Create necessary directories
+resource "null_resource" "setup_directories" {
+  provisioner "local-exec" {
+    command = <<-EOT
+      mkdir -p ${local.postgres_data}/{data,logs,run,tmp}
+    EOT
   }
 }
 
-resource "aws_db_parameter_group" "education" {
-  name   = "${random_pet.random.id}-education"
-  family = "postgres15"
+# PostgreSQL container instance
+resource "null_resource" "postgres_instance" {
+  depends_on = [null_resource.postgres_pull]
 
-  parameter {
-    name  = "log_connections"
-    value = "1"
+  provisioner "local-exec" {
+    command = <<-EOT
+      singularity instance start \
+        --bind ${local.postgres_data}/data:/var/lib/postgresql/data/ \
+        --bind ${local.postgres_data}/logs:/var/log/postgresql/ \
+        --bind ${local.postgres_data}/run:/var/run/postgresql/ \
+        --bind ${local.postgres_data}/tmp:/tmp/ \
+        postgres.sif postgres_instance 
+    EOT
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      # Stop the postgres instance if it's running
+      if singularity instance list | grep -q postgres_instance; then
+        singularity instance stop postgres_instance
+      fi
+    EOT
   }
 }
 
-resource "aws_db_instance" "education" {
-  identifier             = "${var.db_name}-${random_pet.random.id}"
-  instance_class         = "db.t3.micro"
-  allocated_storage      = 5
-  engine                 = "postgres"
-  engine_version         = "15.6"
-  username               = var.db_username
-  password               = var.db_password
-  db_subnet_group_name   = aws_db_subnet_group.education.name
-  vpc_security_group_ids = [aws_security_group.rds.id]
-  parameter_group_name   = aws_db_parameter_group.education.name
-  publicly_accessible    = true
-  skip_final_snapshot    = true
-}
+# Initialize database and create user
+resource "null_resource" "init_database" {
+  depends_on = [
+    null_resource.setup_directories,
+    null_resource.postgres_instance,
+  ]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+
+      # initialize the database using the docker entrypoint
+      cat << 'SCRIPT' > ${local.postgres_data}/tmp/postgres_start.sh
+      #!/bin/bash -l
+
+      # initialize the database using the docker entrypoint
+      export POSTGRES_USER=${local.postgres_user}
+      export POSTGRES_PASSWORD=${local.postgres_password}
+      export POSTGRES_DB=${local.postgres_db}
+
+      # set the path to the postgres binaries
+      PATH=/usr/lib/postgresql/17/bin/:$PATH
+
+      # source the docker entrypoint
+      source /usr/local/bin/docker-entrypoint.sh
+
+      bash /usr/local/bin/docker-ensure-initdb.sh
+
+      SCRIPT
+
+      chmod +x ${local.postgres_data}/tmp/postgres_start.sh
+
+      # initialize the database
+      singularity exec instance://postgres_instance /tmp/postgres_start.sh
+    EOT
+  }
+} 
+
+resource "null_resource" "postgres_start" {
+  depends_on = [null_resource.init_database]
+
+  provisioner "local-exec" {
+    command = "singularity exec instance://postgres_instance pg_ctl start -D /var/lib/postgresql/data/ -l /var/log/postgresql/logfile"
+  }
+
+  provisioner "local-exec" {
+    when = destroy
+    command = <<-EOT
+      # Stop the postgres instance if it's running
+      if singularity instance list | grep -q postgres_instance; then
+        singularity exec instance://postgres_instance pg_ctl stop -D /var/lib/postgresql/data/ -m fast
+      fi
+    EOT
+  }
+} 
