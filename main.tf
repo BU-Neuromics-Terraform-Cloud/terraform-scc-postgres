@@ -14,7 +14,7 @@ terraform {
 # Define local variables
 locals {
   postgres_data = var.data_directory
-  postgres_port = var.postgres_port
+  postgres_base_port = var.postgres_port
   postgres_version = var.postgres_version
   postgres_user = var.postgres_user
   postgres_db = var.postgres_db
@@ -22,6 +22,36 @@ locals {
   postgres_password = var.postgres_password
   instance_id = uuid()
   postgres_instance_name = "postgres_instance_${local.instance_id}"
+}
+
+# Find available port
+resource "null_resource" "find_port" {
+  provisioner "local-exec" {
+    command = <<-EOT
+      #!/bin/bash
+      port=${local.postgres_base_port}
+      
+      # Check if the specified port is in use
+      if netstat -tuln | grep -q ":$port "; then
+        if [[ "${var.force_port}" == "true" ]]; then
+          echo "Error: Port $port is already in use and force_port is set to true" >&2
+          exit 1
+        fi
+        
+        # Find next available port
+        while netstat -tuln | grep -q ":$port "; do
+          ((port++))
+        done
+      fi
+      echo $port > ${local.postgres_data}/tmp/postgres_port
+    EOT
+  }
+}
+
+# Add a data source to read the port
+data "local_file" "postgres_port" {
+  depends_on = [null_resource.find_port]
+  filename = "${local.postgres_data}/tmp/postgres_port"
 }
 
 # Pull PostgreSQL image
@@ -45,11 +75,12 @@ resource "null_resource" "setup_directories" {
 
 # PostgreSQL container instance
 resource "null_resource" "postgres_instance" {
-  depends_on = [null_resource.postgres_pull]
+  depends_on = [null_resource.postgres_pull, null_resource.find_port]
 
-  # Add triggers to store the instance name
+  # Add triggers to store the instance name and port
   triggers = {
     instance_name = local.postgres_instance_name
+    port = trimspace(data.local_file.postgres_port.content)
   }
 
   provisioner "local-exec" {
@@ -88,7 +119,6 @@ resource "null_resource" "init_database" {
 
   provisioner "local-exec" {
     command = <<-EOT
-
       # initialize the database using the docker entrypoint
       cat << 'SCRIPT' > ${local.postgres_data}/tmp/postgres_start.sh
       #!/bin/bash -l
@@ -97,12 +127,16 @@ resource "null_resource" "init_database" {
       export POSTGRES_USER=${local.postgres_user}
       export POSTGRES_PASSWORD=${local.postgres_password}
       export POSTGRES_DB=${local.postgres_db}
+      export POSTGRES_PORT=${null_resource.postgres_instance.triggers.port}
 
       # set the path to the postgres binaries
       PATH=/usr/lib/postgresql/17/bin/:$PATH
 
       # source the docker entrypoint
       source /usr/local/bin/docker-entrypoint.sh
+
+      # Update postgresql.conf with the correct port
+      sed -i "s/#port = 5432/port = $POSTGRES_PORT/" /var/lib/postgresql/data/postgresql.conf
 
       bash /usr/local/bin/docker-ensure-initdb.sh
 

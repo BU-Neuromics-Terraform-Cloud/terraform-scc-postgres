@@ -29,4 +29,10 @@ variable "postgres_version" {
   description = "Version of PostgreSQL to use"
   type        = string
   default     = "latest"
+}
+
+variable "force_port" {
+  description = "If true, fail if the specified port is not available. If false, find next available port"
+  type        = bool
+  default     = false
 } 

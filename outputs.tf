@@ -7,8 +7,8 @@ output "postgres_data_directory" {
 }
 
 output "postgres_port" {
-  description = "PostgreSQL instance port"
-  value       = var.postgres_port
+  description = "The actual port number being used by PostgreSQL"
+  value       = trimspace(data.local_file.postgres_port.content)
 }
 
 output "postgres_user" {
